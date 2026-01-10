@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 import re
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 def scrape_pinellas_property(address):
     """
