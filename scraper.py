@@ -22,13 +22,32 @@ def scrape_pinellas_property(address):
         base_url = "https://www.pcpao.gov"
         search_url = f"{base_url}/quick-search"
         
+        # Clean the address - remove city names that break the search
+        # Pinellas County search only wants street address
+        city_names = ['CLEARWATER', 'LARGO', 'ST PETERSBURG', 'SAINT PETERSBURG', 
+                      'PINELLAS PARK', 'DUNEDIN', 'TARPON SPRINGS', 'SAFETY HARBOR',
+                      'SEMINOLE', 'BELLEAIR', 'GULFPORT', 'TREASURE ISLAND', 
+                      'ST PETE BEACH', 'MADEIRA BEACH', 'REDINGTON BEACH', 'FL']
+        
+        clean_address = address.upper()
+        for city in city_names:
+            clean_address = clean_address.replace(city, '').strip()
+        
+        # Remove ZIP codes
+        clean_address = re.sub(r'\d{5}(-\d{4})?', '', clean_address).strip()
+        # Remove extra spaces
+        clean_address = ' '.join(clean_address.split())
+        
+        print(f"Original: {address}")
+        print(f"Cleaned: {clean_address}")
+        
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
-        # Step 1: Perform search
-        params = {'qu': '1', 'search': address}
+        # Step 1: Perform search with CLEAN address
+        params = {'qu': '1', 'search': clean_address}
         response = session.get(search_url, params=params, timeout=30)
         
         if response.status_code != 200:
