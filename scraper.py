@@ -23,19 +23,20 @@ def scrape_pinellas_property(address):
         search_url = f"{base_url}/quick-search"
         
         # Clean the address - remove city names that break the search
-        # Pinellas County search only wants street address
+        # Pinellas County search works with: "1505 MAPLE ST" OR "1505 MAPLE ST 33755"
+        # But FAILS with city names like "CLEARWATER"
         city_names = ['CLEARWATER', 'LARGO', 'ST PETERSBURG', 'SAINT PETERSBURG', 
                       'PINELLAS PARK', 'DUNEDIN', 'TARPON SPRINGS', 'SAFETY HARBOR',
                       'SEMINOLE', 'BELLEAIR', 'GULFPORT', 'TREASURE ISLAND', 
-                      'ST PETE BEACH', 'MADEIRA BEACH', 'REDINGTON BEACH', 'FL']
+                      'ST PETE BEACH', 'MADEIRA BEACH', 'REDINGTON BEACH', 'FL', 'FLORIDA']
         
         clean_address = address.upper()
         for city in city_names:
-            clean_address = clean_address.replace(city, '').strip()
+            # Use word boundaries to avoid partial matches
+            clean_address = re.sub(r'\b' + city + r'\b', '', clean_address, flags=re.IGNORECASE)
         
-        # Remove ZIP codes
-        clean_address = re.sub(r'\d{5}(-\d{4})?', '', clean_address).strip()
-        # Remove extra spaces
+        # Remove commas and extra spaces
+        clean_address = clean_address.replace(',', ' ')
         clean_address = ' '.join(clean_address.split())
         
         print(f"Original: {address}")
