@@ -1,6 +1,6 @@
 """
-Florida Property Scraper Backend - Pinellas County (FIXED)
-Handles search results page and navigates to property details
+Florida Property Scraper Backend - Pinellas County
+LATEST VERSION - Updated Jan 2026
 """
 
 from flask import Flask, request, jsonify
@@ -16,170 +16,174 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 def scrape_pinellas_property(address):
     """
     Scrapes Pinellas County Property Appraiser for property details
-    Handles both search results and direct property pages
     """
     try:
         base_url = "https://www.pcpao.gov"
-        search_url = "https://www.pcpao.gov"
+        search_url = f"{base_url}/quick-search"
         
         # Clean the address - remove city names that break the search
-        # Pinellas County search works with: "1505 MAPLE ST" OR "1505 MAPLE ST 33755"
-        # But FAILS with city names like "CLEARWATER"
+        # Pinellas search works with: "1505 MAPLE ST" or "1505 MAPLE ST 33755"
+        # But FAILS with city names
         city_names = ['CLEARWATER', 'LARGO', 'ST PETERSBURG', 'SAINT PETERSBURG', 
                       'PINELLAS PARK', 'DUNEDIN', 'TARPON SPRINGS', 'SAFETY HARBOR',
                       'SEMINOLE', 'BELLEAIR', 'GULFPORT', 'TREASURE ISLAND', 
-                      'ST PETE BEACH', 'MADEIRA BEACH', 'REDINGTON BEACH', 'FL', 'FLORIDA']
+                      'ST PETE BEACH', 'MADEIRA BEACH', 'REDINGTON BEACH', 
+                      'FL', 'FLORIDA']
         
         clean_address = address.upper()
         for city in city_names:
-            # Use word boundaries to avoid partial matches
             clean_address = re.sub(r'\b' + city + r'\b', '', clean_address, flags=re.IGNORECASE)
         
         # Remove commas and extra spaces
         clean_address = clean_address.replace(',', ' ')
         clean_address = ' '.join(clean_address.split())
         
-        print(f"Original: {address}")
-        print(f"Cleaned: {clean_address}")
+        print(f"Original address: {address}")
+        print(f"Cleaned address: {clean_address}")
         
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
         })
         
-        # Step 1: Perform search with CLEAN address
-        params = {'qu': '1', 'search': clean_address}
+        # Perform search with cleaned address using CORRECT parameters
+        params = {
+            'qu': '1',
+            'input': clean_address,
+            'search_option': 'address'
+        }
         response = session.get(search_url, params=params, timeout=30)
         
-        if response.status_code != 200:
-            return {"error": "Failed to connect to county website", "status": "error"}
+        print(f"Response status: {response.status_code}")
+        print(f"Response URL: {response.url}")
         
-        # Check if we landed on a property detail page or search results
-        if '/property-details?' in response.url or 'Parcel Summary' in response.text:
-            # We're on a property detail page - parse it
-            soup = BeautifulSoup(response.content, 'html.parser')
-        else:
-            # We're on search results - need to find first property link
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Look for property detail link
-            property_link = soup.find('a', href=re.compile(r'/property-details\?'))
+        if response.status_code != 200:
+            return {"error": f"County website returned status {response.status_code}", "status": "error"}
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Check if we're on a property detail page
+        has_parcel = soup.find(string=re.compile('Parcel Number', re.I))
+        has_owner = soup.find('td', string=re.compile('Owner Name', re.I))
+        is_detail_page = '/property-details' in response.url or has_parcel or has_owner
+        
+        print(f"Is detail page: {is_detail_page}")
+        
+        if not is_detail_page:
+            # We're on search results - find property link
+            print("Looking for property link in search results...")
+            property_link = (
+                soup.find('a', href=re.compile(r'/property-details')) or
+                soup.find('a', href=re.compile(r'parcel='))
+            )
             
             if not property_link:
                 return {
-                    "error": "No property found for this address. Try a more specific search.",
-                    "status": "error",
-                    "suggestion": "Try format: '1505 MAPLE ST' or include city"
+                    "error": "No property found. Try: '1505 MAPLE ST' or '1505 MAPLE ST 33755'",
+                    "status": "error"
                 }
             
-            # Navigate to property details page
-            detail_url = base_url + property_link['href']
-            time.sleep(1)  # Be nice to the server
+            # Navigate to property page
+            detail_url = property_link['href']
+            if not detail_url.startswith('http'):
+                detail_url = base_url + detail_url
+            
+            print(f"Found property link: {detail_url}")
+            time.sleep(1)
             response = session.get(detail_url, timeout=30)
             soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Now extract data from property details page
-        # Extract using table structure
-        def find_field_value(label_text):
-            """Helper to find value by label in table"""
+        # Now extract data from property detail page
+        def find_field(label):
+            """Find table cell value by label"""
             for td in soup.find_all('td'):
-                if label_text.lower() in td.get_text().lower():
+                if label.lower() in td.get_text().lower():
                     next_td = td.find_next_sibling('td')
                     if next_td:
                         return next_td.get_text(strip=True)
             return "Not found"
         
-        # Extract Parcel Number
-        parcel_id = find_field_value('Parcel Number')
-        
-        # Extract Owner Name
-        owner = find_field_value('Owner Name')
-        
-        # Extract Property Use
-        property_type = find_field_value('Property Use')
-        
-        # Extract Site Address
-        site_address = find_field_value('Site Address')
+        # Extract basic info
+        parcel_id = find_field('Parcel Number')
+        owner = find_field('Owner Name')
+        property_type = find_field('Property Use')
+        site_address = find_field('Site Address')
         if site_address == "Not found":
             site_address = address
+        legal_desc = find_field('Legal Description')
+        year_built = find_field('Year Built')
         
-        # Extract Legal Description
-        legal_desc = find_field_value('Legal Description')
-        
-        # Extract Year Built
-        year_built = find_field_value('Year Built')
-        
-        # Extract Living SF / Gross SF
+        # Extract square footage
         living_sf = "Not found"
         gross_sf = "Not found"
-        
-        # Look for Living SF in the summary section
         for td in soup.find_all('td'):
             text = td.get_text(strip=True)
             if text == 'Living SF':
                 next_td = td.find_next_sibling('td')
-                if next_td:
-                    living_sf = next_td.get_text(strip=True)
+                living_sf = next_td.get_text(strip=True) if next_td else "Not found"
             elif text == 'Gross SF':
                 next_td = td.find_next_sibling('td')
-                if next_td:
-                    gross_sf = next_td.get_text(strip=True)
+                gross_sf = next_td.get_text(strip=True) if next_td else "Not found"
         
-        # Extract Living Units
-        living_units = find_field_value('Living Units')
+        living_units = find_field('Living Units')
         
-        # Extract Current Values from table
+        # Extract values from "Final Values" table
         market_value = "Not found"
         assessed_value = "Not found"
         taxable_value = "Not found"
         
-        # Look for "Final Values" section
-        for h3 in soup.find_all(['h3', 'h4']):
-            if 'final values' in h3.get_text().lower():
-                table = h3.find_next('table')
-                if table:
-                    rows = table.find_all('tr')
+        for header in soup.find_all(['h3', 'h4', 'h2']):
+            if 'final values' in header.get_text().lower() or 'values' in header.get_text().lower():
+                value_table = header.find_next('table')
+                if value_table:
+                    rows = value_table.find_all('tr')
                     for row in rows:
                         cells = row.find_all('td')
-                        if len(cells) >= 4 and cells[0].get_text(strip=True) != 'Year':
-                            market_value = cells[1].get_text(strip=True) if len(cells) > 1 else "Not found"
-                            assessed_value = cells[2].get_text(strip=True) if len(cells) > 2 else "Not found"
-                            taxable_value = cells[3].get_text(strip=True) if len(cells) > 3 else "Not found"
-                            break
-                break
+                        if len(cells) >= 4:
+                            first_cell = cells[0].get_text(strip=True)
+                            if first_cell.isdigit() and len(first_cell) == 4:  # Year like 2025
+                                market_value = cells[1].get_text(strip=True) if len(cells) > 1 else "Not found"
+                                assessed_value = cells[2].get_text(strip=True) if len(cells) > 2 else "Not found"
+                                taxable_value = cells[3].get_text(strip=True) if len(cells) > 3 else "Not found"
+                                break
+                if market_value != "Not found":
+                    break
         
-        # Extract Last Sale Info from Sales History
+        # Extract sale history
         last_sale_date = "Not found"
         last_sale_price = "Not found"
         
-        for h3 in soup.find_all(['h3', 'h4']):
-            if 'sales history' in h3.get_text().lower():
-                table = h3.find_next('table')
-                if table:
-                    rows = table.find_all('tr')
-                    for row in rows:
+        for header in soup.find_all(['h3', 'h4', 'h2']):
+            if 'sales history' in header.get_text().lower():
+                sales_table = header.find_next('table')
+                if sales_table:
+                    rows = sales_table.find_all('tr')
+                    for row in rows[1:]:  # Skip header row
                         cells = row.find_all('td')
-                        if len(cells) >= 2 and 'sale date' not in cells[0].get_text().lower():
-                            last_sale_date = cells[0].get_text(strip=True)
-                            last_sale_price = cells[1].get_text(strip=True)
-                            break
-                break
+                        if len(cells) >= 2:
+                            date_text = cells[0].get_text(strip=True)
+                            if date_text and 'Sale Date' not in date_text:
+                                last_sale_date = date_text
+                                last_sale_price = cells[1].get_text(strip=True)
+                                break
+                if last_sale_date != "Not found":
+                    break
         
-        # Extract Land Area
+        # Extract lot size
         lot_size = "Not found"
-        land_area_text = soup.find(string=re.compile(r'Land Area:', re.I))
-        if land_area_text:
-            match = re.search(r'≅\s*([\d,]+)\s*sf', str(land_area_text))
+        land_text = soup.find(string=re.compile(r'Land Area:', re.I))
+        if land_text:
+            match = re.search(r'≅\s*([\d,]+)\s*sf', str(land_text))
             if match:
                 lot_size = f"{match.group(1)} sq ft"
         
-        # Extract Tax District
-        tax_district = find_field_value('Current Tax District')
+        tax_district = find_field('Current Tax District')
+        flood_zone = find_field('Flood Zone')
         
-        # Extract Flood Zone
-        flood_zone = find_field_value('Flood Zone')
-        
-        # Compile all data
+        # Compile results
         property_data = {
             "status": "success",
             "address": site_address,
@@ -207,25 +211,18 @@ def scrape_pinellas_property(address):
             "county": "Pinellas"
         }
         
+        print(f"Extraction complete. Owner: {owner}, Parcel: {parcel_id}")
         return property_data
         
     except requests.Timeout:
-        return {
-            "error": "Request timed out. County website may be slow or down.",
-            "status": "error"
-        }
+        return {"error": "Request timed out - county website slow", "status": "error"}
     except Exception as e:
-        return {
-            "error": f"Scraping error: {str(e)}",
-            "status": "error",
-            "debug": str(e)
-        }
+        print(f"ERROR: {str(e)}")
+        return {"error": f"Scraping error: {str(e)}", "status": "error"}
 
 @app.route('/api/search', methods=['POST'])
 def search_property():
-    """
-    API endpoint to search for property
-    """
+    """Main search endpoint"""
     data = request.json
     address = data.get('address')
     county = data.get('county')
@@ -233,58 +230,91 @@ def search_property():
     if not address or not county:
         return jsonify({"error": "Address and county required"}), 400
     
-    print(f"Searching: {address} in {county} County")
+    print(f"\n=== SEARCH REQUEST ===")
+    print(f"Address: {address}")
+    print(f"County: {county}")
     
     if county.lower() == 'pinellas':
         result = scrape_pinellas_property(address)
     else:
-        result = {
-            "error": f"{county} County scraper not yet implemented",
-            "status": "error"
-        }
+        result = {"error": f"{county} County not yet supported", "status": "error"}
     
     return jsonify(result)
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """
-    Health check endpoint
-    """
+    """Health check endpoint"""
     return jsonify({
         "status": "running",
         "message": "Property scraper backend is active",
+        "version": "2.0",
         "supported_counties": ["Pinellas"]
     })
 
 @app.route('/api/test', methods=['GET'])
 def test_scraper():
-    """
-    Test endpoint with known address
-    """
-    result = scrape_pinellas_property("1505 MAPLE ST CLEARWATER")
+    """Test with known address"""
+    print("\n=== TEST REQUEST ===")
+    result = scrape_pinellas_property("1505 MAPLE ST")
     return jsonify(result)
+
+@app.route('/api/debug', methods=['GET'])
+def debug_scraper():
+    """Debug endpoint - shows raw response from county site"""
+    try:
+        print("\n=== DEBUG REQUEST ===")
+        address = "1505 MAPLE ST"
+        base_url = "https://www.pcpao.gov"
+        search_url = f"{base_url}/quick-search"
+        
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        params = {
+            'qu': '1',
+            'input': address,
+            'search_option': 'address'
+        }
+        response = session.get(search_url, params=params, timeout=30)
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        return jsonify({
+            "status_code": response.status_code,
+            "final_url": response.url,
+            "html_preview": response.text[:3000],
+            "checks": {
+                "has_parcel_number": "Parcel Number" in response.text,
+                "has_owner_name": "Owner Name" in response.text,
+                "has_property_details_url": "/property-details" in response.url,
+                "has_final_values": "Final Values" in response.text or "final values" in response.text.lower(),
+                "has_sales_history": "Sales History" in response.text or "sales history" in response.text.lower()
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"})
 
 @app.route('/', methods=['GET'])
 def home():
-    """
-    Root endpoint
-    """
+    """Root endpoint"""
     return jsonify({
         "message": "Florida Property Scraper API",
+        "version": "2.0",
         "endpoints": {
-            "health": "/api/health",
-            "test": "/api/test",
-            "search": "/api/search (POST)"
+            "health": "/api/health - Check if API is running",
+            "test": "/api/test - Test with sample property",
+            "search": "/api/search - Search for property (POST)",
+            "debug": "/api/debug - Debug county website response"
         }
     })
 
 if __name__ == '__main__':
     print("\n" + "="*60)
-    print("🏠 Florida Property Scraper - Pinellas County")
+    print("🏠 Florida Property Scraper - Pinellas County v2.0")
     print("="*60)
-    print("Server: http://localhost:5000")
-    print("Health: http://localhost:5000/api/health")
-    print("Test:   http://localhost:5000/api/test")
+    print("Ready to scrape property data!")
     print("="*60 + "\n")
     
     app.run(debug=True, port=5000, host='0.0.0.0')
