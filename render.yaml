@@ -1,1 +1,9 @@
-buildCommand: pip install -r requirements.txt && playwright install chromium
+services:
+  - type: web
+    name: property-scraper
+    env: python
+    buildCommand: "pip install -r requirements.txt && playwright install chromium"
+    startCommand: "gunicorn scraper:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.5
