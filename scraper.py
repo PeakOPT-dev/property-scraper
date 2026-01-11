@@ -65,36 +65,57 @@ def scrape_pinellas_property(address):
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Check if we're on a property detail page
-        has_parcel = soup.find(string=re.compile('Parcel Number', re.I))
-        has_owner = soup.find('td', string=re.compile('Owner Name', re.I))
-        is_detail_page = '/property-details' in response.url or has_parcel or has_owner
+        print(f"Looking for results table...")
         
-        print(f"Is detail page: {is_detail_page}")
+        # Look for the results table with parcel numbers
+        # The table has columns: Name, Parcel Number, Address, Tax Dist, Property Use
+        results_table = soup.find('table')
         
-        if not is_detail_page:
-            # We're on search results - find property link
-            print("Looking for property link in search results...")
-            property_link = (
-                soup.find('a', href=re.compile(r'/property-details')) or
-                soup.find('a', href=re.compile(r'parcel='))
-            )
+        if results_table:
+            print("Found results table")
+            # Look for parcel number link in the table
+            parcel_link = None
             
-            if not property_link:
+            for row in results_table.find_all('tr'):
+                cells = row.find_all('td')
+                if len(cells) >= 2:
+                    # Second column should have parcel number with link
+                    parcel_cell = cells[1]
+                    link = parcel_cell.find('a', href=re.compile(r'parcel='))
+                    if link:
+                        parcel_link = link
+                        print(f"Found parcel link: {link.get('href')}")
+                        break
+            
+            if parcel_link:
+                # Navigate to property details
+                detail_url = parcel_link['href']
+                if not detail_url.startswith('http'):
+                    detail_url = base_url + detail_url
+                
+                print(f"Navigating to property details: {detail_url}")
+                time.sleep(1)
+                response = session.get(detail_url, timeout=30)
+                soup = BeautifulSoup(response.content, 'html.parser')
+                is_detail_page = True
+            else:
                 return {
-                    "error": "No property found. Try: '1505 MAPLE ST' or '1505 MAPLE ST 33755'",
+                    "error": "No property found in search results",
                     "status": "error"
                 }
+        else:
+            print("No results table found")
+            # Check if already on detail page
+            has_parcel = soup.find(string=re.compile('Parcel Number', re.I))
+            has_owner = soup.find('td', string=re.compile('Owner Name', re.I))
+            is_detail_page = '/property-details' in response.url or has_parcel or has_owner
             
-            # Navigate to property page
-            detail_url = property_link['href']
-            if not detail_url.startswith('http'):
-                detail_url = base_url + detail_url
-            
-            print(f"Found property link: {detail_url}")
-            time.sleep(1)
-            response = session.get(detail_url, timeout=30)
-            soup = BeautifulSoup(response.content, 'html.parser')
+            if not is_detail_page:
+                return {
+                    "error": "No property found for this address",
+                    "status": "error",
+                    "suggestion": "Try different format: '1505 MAPLE ST' or add ZIP"
+                }
         
         # Now extract data from property detail page
         def find_field(label):
