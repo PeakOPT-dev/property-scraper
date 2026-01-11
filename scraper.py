@@ -1,6 +1,7 @@
 """
 Florida Property Scraper Backend - Pinellas County
 UPDATED: Jan 2026 - Uses Playwright for JS-rendered sites
+FIXED: Endpoint paths, port handling, data extraction
 """
 
 from flask import Flask, request, jsonify
@@ -8,7 +9,6 @@ from flask_cors import CORS
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 import re
-import time
 import os
 
 app = Flask(__name__)
@@ -16,12 +16,11 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 def scrape_pinellas_property(address):
     """
-    Scrapes Pinellas County Property Appraiser using Playwright (Headless Browser)
-    to handle the JavaScript-loaded results table.
+    Scrapes Pinellas County Property Appraiser using Playwright
     """
-    print(f"Starting scrape for: {address}")
+    print(f"\n=== Starting scrape for: {address} ===")
 
-    # 1. Clean Address Logic (Kept from your original code)
+    # Clean Address
     city_names = ['CLEARWATER', 'LARGO', 'ST PETERSBURG', 'SAINT PETERSBURG', 
                   'PINELLAS PARK', 'DUNEDIN', 'TARPON SPRINGS', 'SAFETY HARBOR',
                   'SEMINOLE', 'BELLEAIR', 'GULFPORT', 'TREASURE ISLAND', 
@@ -37,179 +36,260 @@ def scrape_pinellas_property(address):
     
     print(f"Cleaned address: {clean_address}")
 
-    # 2. Launch Headless Browser
     try:
         with sync_playwright() as p:
-            # Launch chromium (headless=True means no UI window pops up)
-            # args=['--no-sandbox'] is often needed for cloud hosting like Render
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+            # Launch browser with proper args for Render
+            browser = p.chromium.launch(
+                headless=True, 
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+            )
             page = browser.new_page()
+            page.set_default_timeout(60000)  # 60 second timeout
 
-            # Construct the search URL directly with parameters
-            # This triggers the React app to load specific results
+            # Navigate to search URL
             base_url = "https://www.pcpao.gov/quick-search"
-            # We encode the parameters manually to be safe
             final_url = f"{base_url}?qu=1&input={clean_address}&search_option=address"
             
             print(f"Navigating to: {final_url}")
-            page.goto(final_url, timeout=60000)
+            page.goto(final_url, wait_until='networkidle')
 
-            # 3. Wait for Data to Load
-            # We wait for either the results table OR the 'Parcel Number' text (if it auto-redirects to details)
-            print("Waiting for results to render...")
+            # Wait for results to load
+            print("Waiting for page to render...")
             try:
-                # Wait up to 15 seconds for a table or parcel number to appear
-                page.wait_for_selector("table, text='Parcel Number'", timeout=15000)
-            except:
-                print("Timed out waiting for selector. Page might be empty or slow.")
+                page.wait_for_selector("table, text='Parcel Number'", timeout=20000)
+            except Exception as e:
+                print(f"Timeout waiting for page: {e}")
+                browser.close()
+                return {"error": "Page load timeout - county site may be slow", "status": "error"}
 
-            # Get the fully rendered HTML
+            # Get rendered HTML
             html_content = page.content()
-            
-            # Now we use BeautifulSoup to parse the rendered HTML (Your existing logic)
             soup = BeautifulSoup(html_content, 'html.parser')
 
-            # 4. Check for Results
-            # Case A: We are on the Search Results list page
+            # Check if we have results table or detail page
             results_table = soup.find('table')
-            is_detail_page = False
+            has_parcel_text = bool(soup.find(string=re.compile('Parcel Number', re.I)))
             
-            if results_table and not soup.find(string=re.compile('Parcel Number', re.I)):
-                print("Found results table, looking for link...")
-                # Find the link to the property details
-                for row in results_table.find_all('tr'):
+            if results_table and not has_parcel_text:
+                # We're on results page - click first result
+                print("On results page, looking for property link...")
+                link_found = False
+                
+                for row in results_table.find_all('tr')[1:]:  # Skip header
                     cells = row.find_all('td')
                     if len(cells) >= 2:
-                        link = row.find('a', href=True)
-                        if link:
-                            click_url = link['href']
-                            if not click_url.startswith('http'):
-                                click_url = "https://www.pcpao.gov" + click_url
+                        # Look for link in Name or Parcel column
+                        link = cells[0].find('a') or cells[1].find('a')
+                        if link and 'href' in link.attrs:
+                            href = link['href']
+                            if not href.startswith('http'):
+                                href = "https://www.pcpao.gov" + href
                             
-                            print(f"Clicking result: {click_url}")
-                            page.goto(click_url)
-                            page.wait_for_load_state('networkidle') # Wait for network to settle
+                            print(f"Clicking result: {href}")
+                            page.goto(href, wait_until='networkidle')
                             html_content = page.content()
                             soup = BeautifulSoup(html_content, 'html.parser')
-                            is_detail_page = True
+                            link_found = True
                             break
+                
+                if not link_found:
+                    browser.close()
+                    return {"error": "No property found in search results", "status": "error"}
+            
+            elif has_parcel_text:
+                print("Already on property detail page")
             else:
-                # Case B: The site auto-redirected us to the Detail Page
-                if "Parcel Number" in soup.get_text():
-                    print("Directly landed on detail page.")
-                    is_detail_page = True
+                browser.close()
+                return {"error": "Could not locate property data", "status": "error"}
 
-            if not is_detail_page:
-                return {
-                    "error": "Could not find property details or parcel number.",
-                    "status": "error",
-                    "debug_html": soup.get_text()[:200]
-                }
-
-            # 5. Extract Data (Your existing parsing logic)
-            def find_field(label):
-                for td in soup.find_all(['td', 'span', 'div']): # Expanded tags
+            # Extract data from detail page
+            def find_table_value(label):
+                """Find value in table by label"""
+                for td in soup.find_all('td'):
                     if label.lower() in td.get_text().lower():
-                        # Try finding next sibling or value inside
-                        # Adjusting logic for modern div-based layouts
-                        parent = td.parent
-                        if parent:
-                            text = parent.get_text(strip=True)
-                            # Simple cleanup to remove the label from the text
-                            clean_val = text.replace(label, '').replace(':', '').strip()
-                            return clean_val
+                        next_td = td.find_next_sibling('td')
+                        if next_td:
+                            return next_td.get_text(strip=True)
                 return "Not found"
 
-            # Re-implementing specific table scraping from your code
-            # Note: I expanded find_field above, but let's stick to your specific table logic 
-            # if the site still uses tables for details.
+            # Basic info
+            parcel_id = find_table_value('Parcel Number')
+            owner = find_table_value('Owner Name')
+            property_type = find_table_value('Property Use')
+            site_address = find_table_value('Site Address')
+            if site_address == "Not found":
+                site_address = address
+            legal_desc = find_table_value('Legal Description')
+            year_built = find_table_value('Year Built')
             
-            # Helper to find value by label in table cells
-            def get_val(label):
-                tag = soup.find(string=re.compile(label))
-                if tag:
-                    # Usually the value is in the next cell or parent's next sibling
-                    try:
-                        return tag.find_next('td').get_text(strip=True)
-                    except:
-                        try:
-                            return tag.parent.find_next_sibling().get_text(strip=True)
-                        except:
-                            return "Not found"
-                return "Not found"
-
-            parcel_id = get_val('Parcel Number')
-            owner = get_val('Owner Name')
-            property_type = get_val('Property Use')
-            year_built = get_val('Year Built')
-            
-            # Living Area
+            # Square footage
             living_sf = "Not found"
-            if soup.find(string='Living SF'):
-                living_sf = get_val('Living SF')
+            gross_sf = "Not found"
+            living_units = "Not found"
             
-            # Values
+            for td in soup.find_all('td'):
+                text = td.get_text(strip=True)
+                if text == 'Living SF':
+                    next_td = td.find_next_sibling('td')
+                    living_sf = next_td.get_text(strip=True) if next_td else "Not found"
+                elif text == 'Gross SF':
+                    next_td = td.find_next_sibling('td')
+                    gross_sf = next_td.get_text(strip=True) if next_td else "Not found"
+                elif 'Living Units' in text:
+                    next_td = td.find_next_sibling('td')
+                    living_units = next_td.get_text(strip=True) if next_td else "Not found"
+
+            # Values from Final Values table
             market_value = "Not found"
             assessed_value = "Not found"
-            # Try to grab the first money value from the "Values" section
-            # This is tricky without seeing the exact DOM, but let's try a generic approach
-            val_table = soup.find('table', id=re.compile('value', re.I))
-            if val_table:
-                rows = val_table.find_all('tr')
-                if len(rows) > 1:
-                    cells = rows[-1].find_all('td') # Last row usually current year
-                    if len(cells) > 2:
-                        market_value = cells[1].get_text(strip=True)
-                        assessed_value = cells[2].get_text(strip=True)
+            taxable_value = "Not found"
+            
+            # Look for "Final Values" or similar header
+            for header in soup.find_all(['h2', 'h3', 'h4']):
+                if 'final values' in header.get_text().lower() or 'values' in header.get_text().lower():
+                    value_table = header.find_next('table')
+                    if value_table:
+                        rows = value_table.find_all('tr')
+                        for row in rows:
+                            cells = row.find_all('td')
+                            if len(cells) >= 4:
+                                first_cell = cells[0].get_text(strip=True)
+                                # Look for current year (2025, 2026, etc)
+                                if first_cell.isdigit() and len(first_cell) == 4:
+                                    market_value = cells[1].get_text(strip=True)
+                                    assessed_value = cells[2].get_text(strip=True)
+                                    taxable_value = cells[3].get_text(strip=True) if len(cells) > 3 else "Not found"
+                                    break
+                    if market_value != "Not found":
+                        break
 
-            # Fallback for values if table not found
-            if market_value == "Not found":
-                 market_value = "$0.00 (Scrape failed)"
+            # Sale history
+            last_sale_date = "Not found"
+            last_sale_price = "Not found"
+            
+            for header in soup.find_all(['h2', 'h3', 'h4']):
+                if 'sales history' in header.get_text().lower():
+                    sales_table = header.find_next('table')
+                    if sales_table:
+                        rows = sales_table.find_all('tr')
+                        for row in rows[1:]:  # Skip header
+                            cells = row.find_all('td')
+                            if len(cells) >= 2:
+                                date_text = cells[0].get_text(strip=True)
+                                if date_text and 'Sale Date' not in date_text:
+                                    last_sale_date = date_text
+                                    last_sale_price = cells[1].get_text(strip=True)
+                                    break
+                    if last_sale_date != "Not found":
+                        break
 
-            # Compile
+            # Lot size
+            lot_size = "Not found"
+            land_text = soup.find(string=re.compile(r'Land Area:', re.I))
+            if land_text:
+                match = re.search(r'≅\s*([\d,]+)\s*sf', str(land_text))
+                if match:
+                    lot_size = f"{match.group(1)} sq ft"
+
+            # Additional fields
+            tax_district = find_table_value('Current Tax District')
+            flood_zone = find_table_value('Flood Zone')
+
+            # Compile results
             data = {
                 "status": "success",
-                "address": address,
-                "parcelId": parcel_id if parcel_id else "Check County Site",
+                "address": site_address,
+                "parcelId": parcel_id,
                 "owner": owner,
                 "propertyType": property_type,
+                "legalDescription": legal_desc,
                 "yearBuilt": year_built,
-                "livingArea": living_sf,
+                "livingArea": f"{living_sf} sq ft" if living_sf != "Not found" else living_sf,
+                "grossArea": f"{gross_sf} sq ft" if gross_sf != "Not found" else gross_sf,
+                "lotSize": lot_size,
+                "livingUnits": living_units,
                 "marketValue": market_value,
                 "assessedValue": assessed_value,
+                "taxableValue": taxable_value,
+                "lastSaleDate": last_sale_date,
+                "lastSalePrice": last_sale_price,
+                "taxDistrict": tax_district,
+                "floodZone": flood_zone,
+                "roofType": "N/A",
                 "county": "Pinellas",
-                "link": page.url
+                "sourceUrl": page.url
             }
             
+            print(f"Scrape successful! Owner: {owner}, Parcel: {parcel_id}")
             browser.close()
             return data
 
     except Exception as e:
-        print(f"Playwright Error: {e}")
-        return {"error": str(e), "status": "error"}
+        print(f"ERROR: {str(e)}")
+        return {"error": f"Scraping error: {str(e)}", "status": "error"}
 
 
 @app.route('/api/search', methods=['POST'])
 def search_property():
+    """Main search endpoint"""
     data = request.json
     address = data.get('address')
-    county = data.get('county')
+    county = data.get('county', '').lower()
     
     if not address:
         return jsonify({"error": "Address required"}), 400
     
-    # We only support Pinellas in this script for now
-    if county and county.lower() != 'pinellas':
-        return jsonify({"error": "Only Pinellas supported in this backend version"}), 400
+    if county and county != 'pinellas':
+        return jsonify({"error": "Only Pinellas County supported", "status": "error"}), 400
 
+    print(f"\n{'='*60}")
+    print(f"API Request: {address} in {county}")
+    print(f"{'='*60}")
+    
     result = scrape_pinellas_property(address)
     return jsonify(result)
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "active", "engine": "playwright"})
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "running",
+        "message": "Playwright scraper active",
+        "engine": "playwright",
+        "supported_counties": ["Pinellas"]
+    })
+
+
+@app.route('/api/test', methods=['GET'])
+def test_endpoint():
+    """Test with known address"""
+    print("\n=== TEST ENDPOINT ===")
+    result = scrape_pinellas_property("1505 MAPLE ST")
+    return jsonify(result)
+
+
+@app.route('/', methods=['GET'])
+def home():
+    """Root endpoint"""
+    return jsonify({
+        "message": "Florida Property Scraper API v2.0",
+        "engine": "Playwright (headless browser)",
+        "endpoints": {
+            "health": "/api/health",
+            "test": "/api/test",
+            "search": "/api/search (POST)"
+        }
+    })
+
 
 if __name__ == '__main__':
-    # Default to 10000 for Render, 5000 for local
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Render uses PORT env variable
+    port = int(os.environ.get('PORT', 5000))
+    print(f"\n{'='*60}")
+    print(f"🏠 Florida Property Scraper - Playwright Edition")
+    print(f"{'='*60}")
+    print(f"Starting on port {port}")
+    print(f"{'='*60}\n")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)
