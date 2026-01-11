@@ -20,7 +20,7 @@ def scrape_pinellas_property(address):
     """
     try:
         base_url = "https://www.pcpao.gov"
-        search_url = f"{base_url}/quick-search"
+        search_url = "https://www.pcpao.gov"
         
         # Clean the address - remove city names that break the search
         # Pinellas County search works with: "1505 MAPLE ST" OR "1505 MAPLE ST 33755"
